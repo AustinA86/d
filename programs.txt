@@ -1,0 +1,421 @@
+CLOUD COMPUTING & AI DEPLOYMENT — LAB 1–8 + OPEN-ENDED 1–2
+Course: BAI701
+
+HOW TO USE
+1. Open Terminal in the lab machine.
+2. Create this file in your working folder, then read it with: cat programs.txt
+3. Run commands one by one. Don't paste YAML/Python directly into Terminal; create the named files first.
+4. Docker must be running for Labs 1–6. Labs 7–8 and open-ended programs need Minikube/Kubernetes.
+5. If a command says a name already exists, remove the old lab container or use a fresh name.
+
+============================================================
+LAB 1 — DOCKER INSTALLATION AND CONTAINER LIFECYCLE
+============================================================
+1. Check Docker:
+   docker version
+   docker info
+
+2. Download images:
+   docker pull alpine
+   docker pull nginx
+   docker images
+
+3. Run Nginx:
+   docker run -d --name lab-nginx -p 8080:80 nginx
+   Open http://localhost:8080 in a browser.
+
+4. List containers:
+   docker ps
+   docker ps -a
+
+5. Stop, start, then remove:
+   docker stop lab-nginx
+   docker start lab-nginx
+   docker stop lab-nginx
+   docker rm lab-nginx
+   docker ps -a
+
+Expected: Nginx welcome page; container appears/disappears from running list.
+
+============================================================
+LAB 2 — BUILD AND RUN A DOCKERIZED FLASK APP
+============================================================
+1. Make a folder:
+   mkdir lab2
+   cd lab2
+
+2. Create app.py:
+   cat > app.py <<'EOF'
+from flask import Flask
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "Hello from the CCAI Docker Lab!"
+
+@app.route("/health")
+def health():
+    return {"status": "healthy"}
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
+EOF
+
+3. Create requirements.txt:
+   echo 'Flask==3.1.0' > requirements.txt
+
+4. Create Dockerfile (no extension):
+   cat > Dockerfile <<'EOF'
+FROM python:3.12-slim
+WORKDIR /app
+RUN apt-get update && apt-get install -y bash procps curl && rm -rf /var/lib/apt/lists/*
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+EXPOSE 5000
+CMD ["python", "app.py"]
+EOF
+
+5. Build and check:
+   docker build -t myapp:v1 .
+   docker images
+
+6. Run and test:
+   docker run -d --name myapp-container -p 5000:5000 myapp:v1
+   curl http://localhost:5000
+   curl http://localhost:5000/health
+
+Expected: text response and {"status":"healthy"}.
+
+============================================================
+LAB 3 — DOCKER LOGS AND TROUBLESHOOTING
+============================================================
+Run from the lab2 folder; start with the Lab 2 container.
+
+1. View logs:
+   docker logs myapp-container
+
+2. Follow logs (Ctrl+C stops following):
+   docker logs -f myapp-container
+   In another terminal: curl http://localhost:5000
+
+3. Inspect inside container:
+   docker exec -it myapp-container /bin/bash
+   pwd
+   ls
+   ps aux
+   exit
+
+4. Create a deliberately failing app:
+   cat > app.py <<'EOF'
+import os
+from flask import Flask
+app = Flask(__name__)
+APP_MESSAGE = os.environ["APP_MESSAGE"]
+
+@app.route("/")
+def home():
+    return APP_MESSAGE
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
+EOF
+
+5. Rebuild and run without the required variable:
+   docker build -t myapp:broken .
+   docker run --name broken-app myapp:broken
+
+   The command exits with an error; that's intentional.
+   docker logs broken-app
+   docker inspect broken-app --format='{{.State.ExitCode}}'
+   docker inspect broken-app --format='{{.State.Error}}'
+
+6. Run it correctly:
+   docker run -d --name fixed-app -e APP_MESSAGE="Application is working again" -p 5001:5000 myapp:broken
+   curl http://localhost:5001
+
+============================================================
+LAB 4 — PERSISTENT POSTGRESQL DATA WITH A VOLUME
+============================================================
+1. Create volume and database container:
+   docker volume create postgres_data
+   docker run -d --name lab-postgres -e POSTGRES_PASSWORD=admin123 -e POSTGRES_DB=labdb -v postgres_data:/var/lib/postgresql/data -p 5432:5432 postgres:15
+
+2. Open PostgreSQL:
+   docker exec -it lab-postgres psql -U postgres -d labdb
+
+3. Type these SQL commands at the postgres prompt:
+   CREATE TABLE students (id SERIAL PRIMARY KEY, name VARCHAR(100), department VARCHAR(100));
+   INSERT INTO students (name, department) VALUES ('Aryaman','CSE'), ('Rahul','AI'), ('Priya','Data Science');
+   SELECT * FROM students;
+   \q
+
+4. Remove the container, but keep the volume:
+   docker stop lab-postgres
+   docker rm lab-postgres
+   docker volume ls
+
+5. Recreate using the same volume:
+   docker run -d --name lab-postgres -e POSTGRES_PASSWORD=admin123 -e POSTGRES_DB=labdb -v postgres_data:/var/lib/postgresql/data -p 5432:5432 postgres:15
+
+6. Verify old data:
+   docker exec -it lab-postgres psql -U postgres -d labdb
+   SELECT * FROM students;
+   \q
+
+Expected: all three rows remain after the container was removed and recreated.
+
+============================================================
+LAB 5 — DOCKER CUSTOM NETWORK
+============================================================
+1. Create network:
+   docker network create lab-network
+   docker network ls
+
+2. Start Nginx and Alpine client on that network:
+   docker run -d --name web --network lab-network nginx
+   docker run -dit --name client --network lab-network alpine
+
+3. Test from client:
+   docker exec -it client sh
+   ping -c 3 web
+   wget -qO- http://web
+   exit
+
+4. Start outsider on the default bridge:
+   docker run -dit --name outsider alpine
+   docker exec outsider ping -c 3 web
+
+Expected: client can resolve/reach web by name; outsider cannot reach web by its name.
+Note: if ping is unavailable in Alpine, the wget test is the useful check.
+
+============================================================
+LAB 6 — DOCKER COMPOSE: WEB + DATABASE
+============================================================
+Use the lab2 folder. Restore app.py to the simple Lab 2 version if Lab 3 changed it.
+
+1. Create docker-compose.yml:
+   cat > docker-compose.yml <<'EOF'
+services:
+  web:
+    build: .
+    ports:
+      - "5000:5000"
+    depends_on:
+      - database
+  database:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: admin123
+      POSTGRES_DB: labdb
+    volumes:
+      - compose_db_data:/var/lib/postgresql/data
+volumes:
+  compose_db_data:
+EOF
+
+2. Start and inspect:
+   docker compose up -d
+   docker compose ps
+   curl http://localhost:5000
+
+3. Logs and shell:
+   docker compose logs web
+   docker compose logs -f web
+   (Ctrl+C stops log following.)
+   docker compose exec web /bin/sh
+   ls
+   exit
+
+4. Stop stack:
+   docker compose down
+   docker compose ps
+
+Expected: both services start. depends_on controls startup order, not full database readiness.
+
+============================================================
+LAB 7 — KUBERNETES POD WITH MINIKUBE
+============================================================
+Prerequisite: Docker is running; Minikube and kubectl are installed.
+
+1. Start and check cluster:
+   minikube start
+   kubectl cluster-info
+   kubectl get nodes
+
+2. Create pod.yaml:
+   cat > pod.yaml <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx-pod
+  labels:
+    app: nginx
+spec:
+  containers:
+    - name: nginx
+      image: nginx:latest
+      ports:
+        - containerPort: 80
+EOF
+
+3. Apply and check:
+   kubectl apply -f pod.yaml
+   kubectl get pods
+   kubectl get pods -w
+   (Ctrl+C stops watching.)
+   kubectl describe pod nginx-pod
+
+4. Delete Pod:
+   kubectl delete pod nginx-pod
+   kubectl get pods
+
+Expected: Pod reaches Running, then disappears when deleted; no controller recreates it.
+
+============================================================
+LAB 8 — KUBERNETES DEPLOYMENT AND SCALING
+============================================================
+Prerequisite: complete Lab 2 and Lab 7. Run from the folder containing Dockerfile and app.py.
+
+1. Build image and load it into Minikube:
+   docker build -t myapp:v1 .
+   minikube image load myapp:v1
+   minikube image ls | grep myapp
+
+2. Create deployment.yaml:
+   cat > deployment.yaml <<'EOF'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp-deployment
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: myapp
+  template:
+    metadata:
+      labels:
+        app: myapp
+    spec:
+      containers:
+        - name: myapp
+          image: myapp:v1
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 5000
+EOF
+
+3. Apply and verify:
+   kubectl apply -f deployment.yaml
+   kubectl get deployments
+   kubectl get pods
+
+4. Scale to five:
+   kubectl scale deployment myapp-deployment --replicas=5
+   kubectl rollout status deployment/myapp-deployment
+   kubectl get pods
+
+5. Delete one Pod (copy a real Pod name from kubectl get pods):
+   kubectl delete pod POD_NAME_HERE
+   kubectl get pods
+
+Expected: Deployment creates a replacement Pod.
+
+6. Scale back:
+   kubectl scale deployment myapp-deployment --replicas=2
+   kubectl get pods
+
+============================================================
+OPEN-ENDED PROGRAM 1 — EXPOSE DEPLOYMENT USING NODEPORT
+============================================================
+Prerequisite: Lab 8 Deployment is running.
+
+1. Create service.yaml:
+   cat > service.yaml <<'EOF'
+apiVersion: v1
+kind: Service
+metadata:
+  name: myapp-service
+spec:
+  type: NodePort
+  selector:
+    app: myapp
+  ports:
+    - port: 5000
+      targetPort: 5000
+      nodePort: 30080
+EOF
+
+2. Apply and inspect:
+   kubectl apply -f service.yaml
+   kubectl get svc myapp-service
+   minikube ip
+
+3. Access app:
+   minikube service myapp-service --url
+   Open the URL printed by the command, or use http://MINIKUBE_IP:30080 if reachable.
+
+4. Demonstrate broken selector:
+   kubectl patch service myapp-service -p '{"spec":{"selector":{"app":"wrong-label"}}}'
+   kubectl get endpoints myapp-service
+   The endpoints should be empty and requests will fail.
+
+5. Restore selector:
+   kubectl patch service myapp-service -p '{"spec":{"selector":{"app":"myapp"}}}'
+   kubectl get endpoints myapp-service
+   Re-test the URL.
+
+============================================================
+OPEN-ENDED PROGRAM 2 — CONFIGMAP, ROLLING UPDATE, DEBUG, ROLLBACK
+============================================================
+Prerequisite: Lab 8 Deployment is running.
+
+1. Create ConfigMap:
+   kubectl create configmap myapp-config --from-literal=APP_MESSAGE="Hello from ConfigMap"
+
+2. Add ConfigMap as an environment variable to the Deployment:
+   kubectl set env deployment/myapp-deployment --from=configmap/myapp-config
+   kubectl rollout status deployment/myapp-deployment
+
+   Note: this only affects the app response if app.py reads APP_MESSAGE. To use it, the app must contain:
+   APP_MESSAGE = os.getenv("APP_MESSAGE", "Default message")
+   and the home route must return APP_MESSAGE. Rebuild/load a new image tag if you change app.py.
+
+3. Demonstrate a rolling update (use a valid image tag available locally):
+   kubectl set image deployment/myapp-deployment myapp=myapp:v1
+   kubectl rollout status deployment/myapp-deployment
+   kubectl rollout history deployment/myapp-deployment
+
+4. Deliberately set a bad image:
+   kubectl set image deployment/myapp-deployment myapp=myapp:does-not-exist
+   kubectl get pods
+   kubectl describe pod POD_NAME_HERE
+   Look for ImagePullBackOff or ErrImagePull.
+
+5. Roll back:
+   kubectl rollout undo deployment/myapp-deployment
+   kubectl rollout status deployment/myapp-deployment
+   kubectl get pods
+
+6. Inspect logs and events:
+   kubectl logs deployment/myapp-deployment
+   kubectl get events --sort-by=.metadata.creationTimestamp
+
+7. Optional shell into a running Pod (copy a Pod name from kubectl get pods):
+   kubectl exec -it POD_NAME_HERE -- /bin/sh
+   printenv | grep APP_MESSAGE
+   exit
+
+============================================================
+QUICK CLEANUP (ONLY AFTER YOUR LAB CHECK IS COMPLETE)
+============================================================
+docker rm -f lab-nginx myapp-container broken-app fixed-app lab-postgres web client outsider 2>/dev/null
+docker network rm lab-network 2>/dev/null
+docker compose down
+kubectl delete -f service.yaml --ignore-not-found
+kubectl delete -f deployment.yaml --ignore-not-found
+kubectl delete -f pod.yaml --ignore-not-found
+
+Do not remove postgres_data unless you no longer need its stored data.
